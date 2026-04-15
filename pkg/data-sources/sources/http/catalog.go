@@ -676,6 +676,8 @@ func (t *openApiTypeExt) FieldDirectives(name string) []*ast.Directive {
 		switch t.TransformName {
 		case "StringAsGeoJson":
 			dd = append(dd, base.FieldSqlDirective(fmt.Sprintf("ST_GeomFromGeoJSON([%s])", name)))
+		case "StringAsWKT":
+			dd = append(dd, base.FieldSqlDirective(fmt.Sprintf("ST_GeomFromText([%s])", name)))
 		}
 	}
 	return dd
