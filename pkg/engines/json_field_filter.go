@@ -2,11 +2,19 @@ package engines
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
-// JSONFieldFilterSQL generates SQL for a single JSONFieldFilter entry.
-// It extracts path, coalesce, and comparison operators from the filter map.
+// jsonFieldFilterTypedBranches are GraphQL input field names on JSONFieldFilter (camelCase).
+var jsonFieldFilterTypedBranches = []string{
+	"int", "bigInt", "float", "string", "bool", "date", "time", "dateTime",
+	"timestamp", "interval", "intRange", "bigIntRange", "timestampRange", "geometry",
+}
+
+// JSONFieldFilterSQL generates SQL for one JSONFieldFilter: path, optional coalesce,
+// and exactly one typed sub-filter (int, string, …) whose operators are delegated to
+// FilterOperationSQLValue on the appropriate engine.
 func JSONFieldFilterSQL(e Engine, sqlName string, filter map[string]any, params []any) (string, []any, error) {
 	pathVal, ok := filter["path"]
 	if !ok {
@@ -17,100 +25,67 @@ func JSONFieldFilterSQL(e Engine, sqlName string, filter map[string]any, params 
 		return "", nil, fmt.Errorf("field filter 'path' must be a non-empty string")
 	}
 
-	// Check for coalesce — if present, wrap the extracted value
 	coalesceVal, hasCoalesce := filter["coalesce"]
 
-	// Build the base SQL name with path applied
-	var baseSQLName string
+	var sqlForOps string
+	pathForOps := path
 	if hasCoalesce && coalesceVal != nil {
 		extracted := e.FieldValueByPath(sqlName, path)
 		coalesceSQLVal, err := e.SQLValue(coalesceVal)
 		if err != nil {
 			return "", nil, fmt.Errorf("invalid coalesce value: %w", err)
 		}
-		baseSQLName = fmt.Sprintf("COALESCE(%s, %s)", extracted, coalesceSQLVal)
+		sqlForOps = fmt.Sprintf("COALESCE(%s, %s)", extracted, coalesceSQLVal)
+		pathForOps = ""
 	} else {
-		baseSQLName = sqlName
+		sqlForOps = sqlName
 	}
 
-	var filters []string
-	for op, v := range filter {
-		if op == "path" || op == "coalesce" || v == nil {
+	var typedKey string
+	var typedMap map[string]any
+	for _, k := range jsonFieldFilterTypedBranches {
+		v, ok := filter[k]
+		if !ok || v == nil {
 			continue
 		}
-		switch op {
-		case "in":
-			// in: [JSON!] — value IN list, expand to OR of eq
-			arr, ok := v.([]any)
-			if !ok {
-				return "", nil, fmt.Errorf("in filter value must be an array")
-			}
-			var orParts []string
-			for _, item := range arr {
-				var q string
-				var p []any
-				var err error
-				if hasCoalesce && coalesceVal != nil {
-					q, p, err = e.FilterOperationSQLValue(baseSQLName, "", "eq", item, params)
-				} else {
-					q, p, err = e.FilterOperationSQLValue(baseSQLName, path, "eq", item, params)
-				}
-				if err != nil {
-					return "", nil, err
-				}
-				orParts = append(orParts, "("+q+")")
-				params = p
-			}
-			if len(orParts) > 0 {
-				filters = append(filters, "("+strings.Join(orParts, " OR ")+")")
-			}
-		case "not_in":
-			// not_in: [JSON!] — value NOT IN list, expand to AND of NOT eq
-			arr, ok := v.([]any)
-			if !ok {
-				return "", nil, fmt.Errorf("not_in filter value must be an array")
-			}
-			var andParts []string
-			for _, item := range arr {
-				var q string
-				var p []any
-				var err error
-				if hasCoalesce && coalesceVal != nil {
-					q, p, err = e.FilterOperationSQLValue(baseSQLName, "", "eq", item, params)
-				} else {
-					q, p, err = e.FilterOperationSQLValue(baseSQLName, path, "eq", item, params)
-				}
-				if err != nil {
-					return "", nil, err
-				}
-				andParts = append(andParts, "NOT("+q+")")
-				params = p
-			}
-			if len(andParts) > 0 {
-				filters = append(filters, "("+strings.Join(andParts, " AND ")+")")
-			}
-		default:
-			var q string
-			var p []any
-			var err error
-			if hasCoalesce && coalesceVal != nil {
-				// With coalesce: use the wrapped baseSQLName (no path, already applied)
-				q, p, err = e.FilterOperationSQLValue(baseSQLName, "", op, v, params)
-			} else {
-				q, p, err = e.FilterOperationSQLValue(sqlName, path, op, v, params)
-			}
-			if err != nil {
-				return "", nil, err
-			}
-			filters = append(filters, "("+q+")")
-			params = p
+		if typedKey != "" {
+			return "", nil, fmt.Errorf("JSONFieldFilter: at most one typed sub-filter allowed, got both %q and %q", typedKey, k)
 		}
+		m, ok := v.(map[string]any)
+		if !ok {
+			return "", nil, fmt.Errorf("JSONFieldFilter.%s must be an object", k)
+		}
+		typedKey = k
+		typedMap = m
 	}
-	if len(filters) == 0 {
+	if typedKey == "" {
+		return "", nil, fmt.Errorf("JSONFieldFilter requires exactly one typed sub-filter (int, bigInt, float, string, bool, date, time, dateTime, timestamp, interval, intRange, bigIntRange, timestampRange, geometry)")
+	}
+
+	ops := make([]string, 0, len(typedMap))
+	for op := range typedMap {
+		if typedMap[op] == nil {
+			continue
+		}
+		ops = append(ops, op)
+	}
+	sort.Strings(ops)
+
+	var parts []string
+	for _, op := range ops {
+		v := typedMap[op]
+		q, p, err := e.FilterOperationSQLValue(sqlForOps, pathForOps, op, v, params)
+		if err != nil {
+			return "", nil, err
+		}
+		parts = append(parts, "("+q+")")
+		params = p
+	}
+	if len(parts) == 0 {
 		return "TRUE", params, nil
 	}
-	if len(filters) == 1 {
-		return strings.TrimPrefix(strings.TrimSuffix(filters[0], ")"), "("), params, nil
+	if len(parts) == 1 {
+		return strings.TrimPrefix(strings.TrimSuffix(parts[0], ")"), "("), params, nil
 	}
-	return strings.Join(filters, " AND "), params, nil
+	return strings.Join(parts, " AND "), params, nil
 }
