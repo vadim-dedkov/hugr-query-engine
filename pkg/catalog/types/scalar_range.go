@@ -139,10 +139,16 @@ func ParseRangeValue(t RangeType, v any) (any, error) {
 		}
 		return b.ToInt32Range()
 	case RangeTypeInt64:
-		if _, ok := b.Upper.(float64); b.Upper != nil && !ok {
+		if b.Lower != nil {
+			b.Lower = coerceJSONNumberToInt(b.Lower)
+		}
+		if b.Upper != nil {
+			b.Upper = coerceJSONNumberToInt(b.Upper)
+		}
+		if _, ok := b.Upper.(int); b.Upper != nil && !ok {
 			return nil, fmt.Errorf("invalid upper bound")
 		}
-		if _, ok := b.Lower.(float64); b.Lower != nil && !ok {
+		if _, ok := b.Lower.(int); b.Lower != nil && !ok {
 			return nil, fmt.Errorf("invalid lower bound")
 		}
 		return b.ToInt64Range()
@@ -157,6 +163,19 @@ func ParseRangeValue(t RangeType, v any) (any, error) {
 	}
 
 	return b, nil
+}
+
+func coerceJSONNumberToInt(v any) any {
+	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	default:
+		return v
+	}
 }
 
 type BaseRange struct {
@@ -247,6 +266,9 @@ func parseStringRange(input string) (map[string]interface{}, error) {
 			v, err := strconv.ParseFloat(value, 64)
 			return int(v), err
 		default:
+			if _, err := time.Parse(time.RFC3339, value); err == nil {
+				return value, nil
+			}
 			return strconv.Atoi(value)
 		}
 	}
@@ -286,4 +308,56 @@ func parseStringRange(input string) (map[string]interface{}, error) {
 	}
 
 	return result, nil
+}
+
+// RangeToBracketLiteral renders a range as PostgreSQL text form without surrounding
+// SQL quotes (e.g. "[10,20)"), matching RecordToJSON / jsonb extraction used for JSON columns.
+func RangeToBracketLiteral(v any) (string, error) {
+	var lower, upper string
+	var detail RangeDetail
+	switch v := v.(type) {
+	case Int32Range:
+		if v.Detail.IsEmpty() {
+			return "empty", nil
+		}
+		if !v.Detail.IsLowerInfinity() {
+			lower = strconv.FormatInt(int64(v.Lower), 10)
+		}
+		if !v.Detail.IsUpperInfinity() {
+			upper = strconv.FormatInt(int64(v.Upper), 10)
+		}
+		detail = v.Detail
+	case Int64Range:
+		if v.Detail.IsEmpty() {
+			return "empty", nil
+		}
+		if !v.Detail.IsLowerInfinity() {
+			lower = strconv.FormatInt(v.Lower, 10)
+		}
+		if !v.Detail.IsUpperInfinity() {
+			upper = strconv.FormatInt(v.Upper, 10)
+		}
+		detail = v.Detail
+	case TimeRange:
+		if v.Detail.IsEmpty() {
+			return "empty", nil
+		}
+		if !v.Detail.IsLowerInfinity() {
+			lower = v.Lower.Format(time.RFC3339)
+		}
+		if !v.Detail.IsUpperInfinity() {
+			upper = v.Upper.Format(time.RFC3339)
+		}
+		detail = v.Detail
+	default:
+		return "", fmt.Errorf("unsupported range type %T", v)
+	}
+	rightBracket, leftBracket := ")", "("
+	if detail.IsLowerInclusive() {
+		leftBracket = "["
+	}
+	if detail.IsUpperInclusive() {
+		rightBracket = "]"
+	}
+	return fmt.Sprintf("%s%s,%s%s", leftBracket, lower, upper, rightBracket), nil
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	ctypes "github.com/hugr-lab/query-engine/pkg/catalog/types"
 	"github.com/paulmach/orb"
 )
 
@@ -166,6 +167,41 @@ func TestJSONFieldFilterSQL_DuckDB(t *testing.T) {
 			wantSQL:    "(try_cast(json_extract_string(meta::JSON,'$.subscription.duration') AS INTERVAL) = CAST($1 AS INTERVAL))",
 			wantParams: []any{"5400 seconds"},
 		},
+		{
+			name: "intRange eq — bracket literal param (VARCHAR extract)",
+			fv: map[string]any{
+				"path":     "span.i4",
+				"intRange": map[string]any{"eq": ctypes.Int32Range{Lower: 10, Upper: 20, Detail: ctypes.RangeLowerInclusive}},
+			},
+			wantSQL:    "(json_extract_string(meta::JSON,'$.span.i4') = $1)",
+			wantParams: []any{"[10,20)"},
+		},
+		{
+			name: "intRange intersects — regexp bounds + half-open overlap",
+			fv: map[string]any{
+				"path": "span.i4",
+				"intRange": map[string]any{
+					"intersects": ctypes.Int32Range{Lower: 15, Upper: 25, Detail: ctypes.RangeLowerInclusive},
+				},
+			},
+			wantSQL:    "(((CAST(regexp_extract(json_extract_string(meta::JSON,'$.span.i4'), '^[\\[(](-?\\d+)', 1) AS BIGINT)) < $1 AND (CAST(regexp_extract(json_extract_string(meta::JSON,'$.span.i4'), ',(-?\\d+)[\\])]', 1) AS BIGINT)) > $2))",
+			wantParams: []any{int64(25), int64(15)},
+		},
+		{
+			name: "timestampRange eq — same bracket literal as RangeToBracketLiteral",
+			fv: map[string]any{
+				"path": "span.tstz",
+				"timestampRange": map[string]any{
+					"eq": ctypes.TimeRange{
+						Lower:  time.Date(2024, 6, 10, 0, 0, 0, 0, time.UTC),
+						Upper:  time.Date(2024, 6, 20, 0, 0, 0, 0, time.UTC),
+						Detail: ctypes.RangeLowerInclusive,
+					},
+				},
+			},
+			wantSQL:    "(json_extract_string(meta::JSON,'$.span.tstz') = $1)",
+			wantParams: []any{"[2024-06-10T00:00:00Z,2024-06-20T00:00:00Z)"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -252,13 +288,32 @@ func TestJSONFieldFilterSQL_Postgres(t *testing.T) {
 			wantParams: []any{90 * time.Minute},
 		},
 		{
-			name: "geometry intersects delegates to FilterOperationSQLValue",
+			name: "intRange eq — INT4RANGE bind",
 			fv: map[string]any{
-				"path":     "shape",
-				"geometry": map[string]any{"intersects": orb.Point{1, 2}},
+				"path":     "span.i4",
+				"intRange": map[string]any{"eq": ctypes.Int32Range{Lower: 10, Upper: 20, Detail: ctypes.RangeLowerInclusive}},
 			},
-			wantSQL:    "(ST_Intersects(ST_GeomFromGeoJSON((meta->>'shape')::text),$1))",
-			wantParams: []any{orb.Point{1, 2}},
+			wantSQL:    "((meta->'span'->>'i4')::INT4RANGE = $1)",
+			wantParams: []any{ctypes.Int32Range{Lower: 10, Upper: 20, Detail: ctypes.RangeLowerInclusive}},
+		},
+		{
+			name: "timestampRange intersects — TSTZRANGE &&",
+			fv: map[string]any{
+				"path": "span.tstz",
+				"timestampRange": map[string]any{
+					"intersects": ctypes.TimeRange{
+						Lower:  time.Date(2024, 6, 11, 0, 0, 0, 0, time.UTC),
+						Upper:  time.Date(2024, 6, 12, 0, 0, 0, 0, time.UTC),
+						Detail: ctypes.RangeLowerInclusive,
+					},
+				},
+			},
+			wantSQL: "((meta->'span'->>'tstz')::TSTZRANGE && $1)",
+			wantParams: []any{ctypes.TimeRange{
+				Lower:  time.Date(2024, 6, 11, 0, 0, 0, 0, time.UTC),
+				Upper:  time.Date(2024, 6, 12, 0, 0, 0, 0, time.UTC),
+				Detail: ctypes.RangeLowerInclusive,
+			}},
 		},
 	}
 	for _, tt := range cases {

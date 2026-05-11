@@ -1,0 +1,10 @@
+{
+  pg_store {
+    json_field_demo(
+      filter: { data: { field: { path: "span.i8", bigIntRange: { eq: "[3000000000,6000000000)" } } } }
+      order_by: [{ field: "id", direction: ASC }]
+    ) {
+      id
+    }
+  }
+}

@@ -67,14 +67,34 @@ func (e *Postgres) FieldValueByPath(sqlName, path string) string {
 }
 
 // CoerceJSONFieldFilterValue normalises a JSONFieldFilter sub-filter value so
-// that pgx binds it as the expected SQL type. Only TIME needs intervention:
-// pgx maps time.Time to TIMESTAMPTZ, which year-0001 makes invalid and PG
-// would not implicitly cast TIMESTAMPTZ to TIME anyway. Other typed values
-// flow through pgx's native bindings (DATE/TIMESTAMP/TIMESTAMPTZ from time.Time,
-// INTERVAL from time.Duration) and PG's implicit coercion handles the rest.
+// that pgx binds it as the expected SQL type. TIME needs intervention (see
+// below). Range sub-filters may arrive as bracket strings from GraphQL
+// variables; parse them so intersects/includes/excludes hit the range branch of
+// FilterOperationSQLValue (not the string branch). Other typed values flow
+// through pgx's native bindings and PG's implicit coercion.
 func (e *Postgres) CoerceJSONFieldFilterValue(v any, subType string) any {
 	if t, ok := v.(time.Time); ok && subType == SQLTypeTime {
 		return t.Format(time.TimeOnly)
+	}
+	switch subType {
+	case SQLTypeInt4Range:
+		if s, ok := v.(string); ok {
+			if r, err := ctypes.ParseRangeValue(ctypes.RangeTypeInt32, s); err == nil {
+				return r
+			}
+		}
+	case SQLTypeInt8Range:
+		if s, ok := v.(string); ok {
+			if r, err := ctypes.ParseRangeValue(ctypes.RangeTypeInt64, s); err == nil {
+				return r
+			}
+		}
+	case SQLTypeTstzRange:
+		if s, ok := v.(string); ok {
+			if r, err := ctypes.ParseRangeValue(ctypes.RangeTypeTimestamp, s); err == nil {
+				return r
+			}
+		}
 	}
 	return v
 }
@@ -529,6 +549,8 @@ func (e *Postgres) FilterOperationSQLValue(sqlName, path, op string, value any, 
 			return fmt.Sprintf("%s && %s", sqlName, val), params, nil
 		case "includes":
 			return fmt.Sprintf("%s @> %s", sqlName, val), params, nil
+		case "excludes":
+			return fmt.Sprintf("NOT (%s && %s)", sqlName, val), params, nil
 		default:
 			return "", nil, fmt.Errorf("unsupported filter operator: %s", op)
 		}

@@ -285,6 +285,8 @@ func (e *DuckDB) FilterOperationSQLValue(sqlName, path, op string, value any, pa
 	}
 
 	switch value := value.(type) {
+	case ctypes.Int32Range, ctypes.Int64Range, ctypes.TimeRange:
+		return duckdbJSONFieldRangeFilter(sqlName, op, value, params)
 	case types.DateTime:
 		params = append(params, time.Time(value))
 		val := "$" + strconv.Itoa(len(params))
@@ -617,6 +619,20 @@ func (e *DuckDB) CoerceJSONFieldFilterValue(v any, subType string) any {
 				return strconv.FormatInt(int64(d/time.Second), 10) + " seconds"
 			}
 		}
+		switch subType {
+		case SQLTypeInt4Range:
+			if r, err := ctypes.ParseRangeValue(ctypes.RangeTypeInt32, t); err == nil {
+				return r
+			}
+		case SQLTypeInt8Range:
+			if r, err := ctypes.ParseRangeValue(ctypes.RangeTypeInt64, t); err == nil {
+				return r
+			}
+		case SQLTypeTstzRange:
+			if r, err := ctypes.ParseRangeValue(ctypes.RangeTypeTimestamp, t); err == nil {
+				return r
+			}
+		}
 	}
 	return v
 }
@@ -661,9 +677,10 @@ func (e DuckDB) ExtractJSONTypedValue(sql, path, t string) string {
 		}
 		return "ST_GeomFromGeoJSON(NULLIF(" + extracted + "::VARCHAR, 'null'))"
 	}
-	// VARCHAR uses json_extract_string so quotes around JSON strings are stripped
-	// (json_value preserves them, breaking direct equality).
-	if t == SQLTypeVarchar {
+	// VARCHAR and PostgreSQL-style range literals are JSON strings; use json_extract_string
+	// (see DATE branch: json_value keeps extra quotes for strings).
+	switch t {
+	case SQLTypeVarchar, SQLTypeInt4Range, SQLTypeInt8Range, SQLTypeTstzRange:
 		if path == "" {
 			return "try_cast(" + sql + " AS VARCHAR)"
 		}

@@ -3,7 +3,6 @@ package engines
 import (
 	"errors"
 	"fmt"
-	"log"
 	"regexp"
 	"sort"
 	"strconv"
@@ -26,16 +25,15 @@ const (
 	SQLTypeTimestampTZ = "TIMESTAMPTZ"
 	SQLTypeInterval    = "INTERVAL"
 	SQLTypeGeometry    = "GEOMETRY"
+	SQLTypeInt4Range   = "INT4RANGE"
+	SQLTypeInt8Range   = "INT8RANGE"
+	SQLTypeTstzRange   = "TSTZRANGE"
 )
 
 // JSONFieldFilterSubTypes maps GraphQL JSONFieldFilter sub-filter names to
 // the engine-native SQL type names that ExtractJSONTypedValue accepts.
 // The slice order doubles as a deterministic iteration order so multiple
 // engines pick the same single sub-filter when parsing the input.
-//
-// Range types (intRange, bigIntRange, timestampRange) are intentionally absent:
-// reconstructing a range from a JSON object would require dialect-specific
-// composition that isn't implemented yet.
 var JSONFieldFilterSubTypes = []struct {
 	Name    string
 	SQLType string
@@ -51,6 +49,9 @@ var JSONFieldFilterSubTypes = []struct {
 	{"timestamp", SQLTypeTimestampTZ},
 	{"interval", SQLTypeInterval},
 	{"geometry", SQLTypeGeometry},
+	{"intRange", SQLTypeInt4Range},
+	{"bigIntRange", SQLTypeInt8Range},
+	{"timestampRange", SQLTypeTstzRange},
 }
 
 // JSONFieldFilterShape is the parsed contents of a JSONFieldFilter input map.
@@ -190,7 +191,6 @@ func CompileJSONFieldFilterSQL(e Engine, sqlName, basePath string, fv map[string
 	default:
 		out = strings.Join(conds, " AND ")
 	}
-	log.Printf("DEBUG json_field_filter engine=%T sql=%q params=%v", e, out, params)
 	return out, params, nil
 }
 

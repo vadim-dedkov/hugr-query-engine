@@ -1,0 +1,10 @@
+{
+  local_db {
+    json_field_demo(
+      filter: { data: { field: { path: "span.i4", intRange: { eq: "[10,20)" } } } }
+      order_by: [{ field: "id", direction: ASC }]
+    ) {
+      id
+    }
+  }
+}

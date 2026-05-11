@@ -131,4 +131,5 @@ INSERT INTO json_field_demo (id, data) VALUES
     -- Rows 11-12 carry extra paths for typed sub-filter coverage
     -- (bigInt, float, bool, date, time, dateTime, interval, timestamp).
     (11, '{"user":{"age":35,"country":"US"},"metrics":{"score":0.80},"shape":{"type":"Point","coordinates":[10.5,51.5]},"event":{"at":"2024-06-11T10:00:00Z","local_dt":"2024-06-11T10:00:00"},"account":{"balance":5000000000},"flags":{"premium":true},"signup":{"day":"2024-01-15"},"lunch":{"at_time":"12:30:00"},"subscription":{"duration":"PT1H30M"}}'),
-    (12, '{"user":{"age":22,"country":"US"},"metrics":{"score":0.40},"shape":{"type":"Point","coordinates":[10.6,51.6]},"event":{"at":"2024-06-12T10:00:00Z","local_dt":"2024-06-12T10:00:00"},"account":{"balance":2500000000},"flags":{"premium":false},"signup":{"day":"2024-02-20"},"lunch":{"at_time":"13:00:00"},"subscription":{"duration":"PT2H"}}');
+    (12, '{"user":{"age":22,"country":"US"},"metrics":{"score":0.40},"shape":{"type":"Point","coordinates":[10.6,51.6]},"event":{"at":"2024-06-12T10:00:00Z","local_dt":"2024-06-12T10:00:00"},"account":{"balance":2500000000},"flags":{"premium":false},"signup":{"day":"2024-02-20"},"lunch":{"at_time":"13:00:00"},"subscription":{"duration":"PT2H"}}'),
+    (13, '{"span":{"i4":"[10,20)","i8":"[3000000000,6000000000)","tstz":"[2024-06-10T00:00:00Z,2024-06-20T00:00:00Z)"}}'::jsonb);

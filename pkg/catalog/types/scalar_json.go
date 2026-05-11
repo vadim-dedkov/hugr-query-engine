@@ -26,7 +26,7 @@ JSONFilter: eq, has, has_all, contains, is_null, and field (filter on a value at
 For field: use path (dot notation, e.g. "catalog.field_name"),
 optional coalesce (JSON literal used when the extracted value is missing or null),
 optional isNull, and at most one typed sub-filter that matches the runtime type at that path
-(Int, BigInt, Float, String, Boolean, Date, Time, DateTime, Timestamp, Interval, Geometry).
+(Int, BigInt, Float, String, Boolean, Date, Time, DateTime, Timestamp, Interval, Geometry, IntRange, BigIntRange, TimestampRange).
 isNull is strict and independent of the typed sub-filter:
 isNull: true matches when the key exists at the given path AND its value is JSON null;
 isNull: false matches when the key exists AND its value is anything other than JSON null;
@@ -70,6 +70,9 @@ input JSONFieldFilter @system {
   timestamp: TimestampFilter
   interval: IntervalFilter
   geometry: GeometryFilter
+  intRange: IntRangeFilter
+  bigIntRange: BigIntRangeFilter
+  timestampRange: TimestampRangeFilter
   coalesce: JSON
 }
 

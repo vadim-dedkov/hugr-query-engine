@@ -115,6 +115,15 @@ func TestParseStringRange(t *testing.T) {
 			},
 			err: false,
 		},
+		{
+			input: "[2024-06-10T00:00:00Z,2024-06-20T00:00:00Z)",
+			expected: map[string]interface{}{
+				"type":  RangeLowerInclusive,
+				"lower": "2024-06-10T00:00:00Z",
+				"upper": "2024-06-20T00:00:00Z",
+			},
+			err: false,
+		},
 	}
 
 	for _, test := range tests {
