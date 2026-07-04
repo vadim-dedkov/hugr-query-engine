@@ -100,13 +100,18 @@ func jsonExprFromPlainArrow(arrowField arrow.Field, sourceExpr string) string {
 }
 
 func jsonExprFromArrowJSONExtension(arrowField arrow.Field, sourceExpr string) (string, error) {
-	if expr, ok := jsonExprFromSerializedStorage(arrowField, sourceExpr); ok {
-		return expr, nil
+	// arrow.json is a canonical Arrow extension: its storage must be UTF-8 text.
+	switch arrowStorageTypeID(arrowField.Type) {
+	case arrow.STRING, arrow.LARGE_STRING, arrow.STRING_VIEW:
+		return "CAST(" + sourceExpr + " AS JSON)", nil
+	default:
+		return "", fmt.Errorf("arrow column %q with type %s cannot use arrow.json storage", arrowField.Name, arrowField.Type)
 	}
-	return "", fmt.Errorf("arrow column %q with type %s cannot use arrow.json storage", arrowField.Name, arrowField.Type)
 }
 
 func jsonExprFromGeoJSONExtension(arrowField arrow.Field, sourceExpr string) (string, error) {
+	// GeoJSON aliases are Hugr-supported encodings; they may arrive as text,
+	// bytes, or a JSON object-like Arrow value.
 	if expr, ok := jsonExprFromSerializedStorage(arrowField, sourceExpr); ok {
 		return expr, nil
 	}
@@ -157,7 +162,7 @@ func arrowIngestGeometryStagingExprFromExtension(ext string, arrowField arrow.Fi
 	case "geoarrow.linestring", "geoarrow.polygon",
 		"geoarrow.multipoint", "geoarrow.multilinestring", "geoarrow.multipolygon",
 		"geoarrow.point", "geoarrow.geometry", "geoarrow.geometrycollection":
-		return arrowIngestGeoArrowNativeGeometryStagingExpr(ext, sourceExpr)
+		return arrowIngestGeoArrowNativeGeometryStagingExpr(ext, arrowField, sourceExpr)
 	default:
 		return "", fmt.Errorf("unsupported GeoArrow extension %q", ext)
 	}
@@ -165,7 +170,7 @@ func arrowIngestGeometryStagingExprFromExtension(ext string, arrowField arrow.Fi
 
 func arrowIngestWKBGeometryStagingExpr(arrowField arrow.Field, sourceExpr string) (string, error) {
 	switch arrowStorageTypeID(arrowField.Type) {
-	case arrow.BINARY, arrow.LARGE_BINARY, arrow.BINARY_VIEW, arrow.FIXED_SIZE_BINARY:
+	case arrow.BINARY, arrow.LARGE_BINARY, arrow.BINARY_VIEW:
 		return sourceExpr, nil
 	default:
 		return "", fmt.Errorf("arrow column %q with type %s cannot use geoarrow.wkb storage", arrowField.Name, arrowField.Type)
@@ -233,52 +238,162 @@ func arrowExtensionNameFromTypeOrMetadata(field arrow.Field) string {
 }
 
 func arrowStorageTypeID(dt arrow.DataType) arrow.Type {
+	return arrowStorageType(dt).ID()
+}
+
+func arrowStorageType(dt arrow.DataType) arrow.DataType {
 	if extType, ok := dt.(arrow.ExtensionType); ok {
-		return extType.StorageType().ID()
+		return extType.StorageType()
 	}
-	return dt.ID()
+	return dt
 }
 
-func arrowIngestGeoArrowPointGeometryStagingExpr(sql string) string {
-	return "ST_Point(struct_extract(" + sql + ", 'x'), struct_extract(" + sql + ", 'y'))"
+func arrowIngestGeoArrowPointGeometryStagingExpr(coordType arrow.DataType, sql string) (string, error) {
+	switch typ := arrowStorageType(coordType).(type) {
+	case *arrow.StructType:
+		if err := validateGeoArrowStructCoordinate(typ); err != nil {
+			return "", err
+		}
+		return "ST_Point(struct_extract(" + sql + ", 'x'), struct_extract(" + sql + ", 'y'))", nil
+	case *arrow.FixedSizeListType:
+		if err := validateGeoArrowFixedSizeListCoordinate(typ); err != nil {
+			return "", err
+		}
+		return "ST_Point(" + sql + "[1], " + sql + "[2])", nil
+	default:
+		return "", fmt.Errorf("unsupported GeoArrow coordinate storage %s", coordType)
+	}
 }
 
-func arrowIngestGeoArrowLineStringGeometryStagingExpr(sql string) string {
-	return "ST_MakeLine(list_transform(" + sql + ", lambda _p: " + arrowIngestGeoArrowPointGeometryStagingExpr("_p") + "))"
+func validateGeoArrowStructCoordinate(typ *arrow.StructType) error {
+	x, ok := typ.FieldByName("x")
+	if !ok {
+		return fmt.Errorf("GeoArrow struct coordinate is missing x field")
+	}
+	y, ok := typ.FieldByName("y")
+	if !ok {
+		return fmt.Errorf("GeoArrow struct coordinate is missing y field")
+	}
+	if !isArrowFloatingPointType(x.Type) || !isArrowFloatingPointType(y.Type) {
+		return fmt.Errorf("GeoArrow struct coordinate x/y fields must be floating-point values")
+	}
+	return nil
 }
 
-func arrowIngestGeoArrowPolygonGeometryStagingExpr(sql string) string {
-	shell := arrowIngestGeoArrowLineStringGeometryStagingExpr(sql + "[1]")
-	holes := "list_transform(" + sql + "[2:], lambda _r: " + arrowIngestGeoArrowLineStringGeometryStagingExpr("_r") + ")"
-	return "ST_MakePolygon(" + shell + ", " + holes + ")"
+func validateGeoArrowFixedSizeListCoordinate(typ *arrow.FixedSizeListType) error {
+	if typ.Len() < 2 {
+		return fmt.Errorf("GeoArrow fixed-size-list coordinate must have at least two values")
+	}
+	if !isArrowFloatingPointType(typ.Elem()) {
+		return fmt.Errorf("GeoArrow fixed-size-list coordinate values must be floating-point values")
+	}
+	return nil
 }
 
-func arrowIngestGeoArrowMultiPointGeometryStagingExpr(sql string) string {
-	return "ST_Multi(ST_Collect(list_transform(" + sql + ", lambda _p: " + arrowIngestGeoArrowPointGeometryStagingExpr("_p") + ")))"
+func isArrowFloatingPointType(dt arrow.DataType) bool {
+	switch arrowStorageTypeID(dt) {
+	case arrow.FLOAT32, arrow.FLOAT64:
+		return true
+	default:
+		return false
+	}
 }
 
-func arrowIngestGeoArrowMultiLineStringGeometryStagingExpr(sql string) string {
-	return "ST_Multi(ST_Collect(list_transform(" + sql + ", lambda _ls: " + arrowIngestGeoArrowLineStringGeometryStagingExpr("_ls") + ")))"
+func arrowListElemType(dt arrow.DataType) (arrow.DataType, bool) {
+	switch typ := arrowStorageType(dt).(type) {
+	case *arrow.ListType:
+		return typ.Elem(), true
+	case *arrow.LargeListType:
+		return typ.Elem(), true
+	case *arrow.ListViewType:
+		return typ.Elem(), true
+	case *arrow.LargeListViewType:
+		return typ.Elem(), true
+	default:
+		return nil, false
+	}
 }
 
-func arrowIngestGeoArrowMultiPolygonGeometryStagingExpr(sql string) string {
-	return "ST_Multi(ST_Collect(list_transform(" + sql + ", lambda _poly: " + arrowIngestGeoArrowPolygonGeometryStagingExpr("_poly") + ")))"
+func arrowIngestGeoArrowLineStringGeometryStagingExpr(lineStringType arrow.DataType, sql string) (string, error) {
+	coordType, ok := arrowListElemType(lineStringType)
+	if !ok {
+		return "", fmt.Errorf("GeoArrow linestring storage must be a list of coordinates, got %s", lineStringType)
+	}
+	pointExpr, err := arrowIngestGeoArrowPointGeometryStagingExpr(coordType, "_p")
+	if err != nil {
+		return "", err
+	}
+	return "ST_MakeLine(list_transform(" + sql + ", lambda _p: " + pointExpr + "))", nil
 }
 
-func arrowIngestGeoArrowNativeGeometryStagingExpr(ext, sql string) (string, error) {
+func arrowIngestGeoArrowPolygonGeometryStagingExpr(polygonType arrow.DataType, sql string) (string, error) {
+	ringType, ok := arrowListElemType(polygonType)
+	if !ok {
+		return "", fmt.Errorf("GeoArrow polygon storage must be a list of rings, got %s", polygonType)
+	}
+	shell, err := arrowIngestGeoArrowLineStringGeometryStagingExpr(ringType, sql+"[1]")
+	if err != nil {
+		return "", err
+	}
+	holeExpr, err := arrowIngestGeoArrowLineStringGeometryStagingExpr(ringType, "_r")
+	if err != nil {
+		return "", err
+	}
+	holes := "list_transform(" + sql + "[2:], lambda _r: " + holeExpr + ")"
+	return "ST_MakePolygon(" + shell + ", " + holes + ")", nil
+}
+
+func arrowIngestGeoArrowMultiPointGeometryStagingExpr(multiPointType arrow.DataType, sql string) (string, error) {
+	coordType, ok := arrowListElemType(multiPointType)
+	if !ok {
+		return "", fmt.Errorf("GeoArrow multipoint storage must be a list of coordinates, got %s", multiPointType)
+	}
+	pointExpr, err := arrowIngestGeoArrowPointGeometryStagingExpr(coordType, "_p")
+	if err != nil {
+		return "", err
+	}
+	return "ST_Multi(ST_Collect(list_transform(" + sql + ", lambda _p: " + pointExpr + ")))", nil
+}
+
+func arrowIngestGeoArrowMultiLineStringGeometryStagingExpr(multiLineStringType arrow.DataType, sql string) (string, error) {
+	lineStringType, ok := arrowListElemType(multiLineStringType)
+	if !ok {
+		return "", fmt.Errorf("GeoArrow multilinestring storage must be a list of linestrings, got %s", multiLineStringType)
+	}
+	lineStringExpr, err := arrowIngestGeoArrowLineStringGeometryStagingExpr(lineStringType, "_ls")
+	if err != nil {
+		return "", err
+	}
+	return "ST_Multi(ST_Collect(list_transform(" + sql + ", lambda _ls: " + lineStringExpr + ")))", nil
+}
+
+func arrowIngestGeoArrowMultiPolygonGeometryStagingExpr(multiPolygonType arrow.DataType, sql string) (string, error) {
+	polygonType, ok := arrowListElemType(multiPolygonType)
+	if !ok {
+		return "", fmt.Errorf("GeoArrow multipolygon storage must be a list of polygons, got %s", multiPolygonType)
+	}
+	polygonExpr, err := arrowIngestGeoArrowPolygonGeometryStagingExpr(polygonType, "_poly")
+	if err != nil {
+		return "", err
+	}
+	return "ST_Multi(ST_Collect(list_transform(" + sql + ", lambda _poly: " + polygonExpr + ")))", nil
+}
+
+func arrowIngestGeoArrowNativeGeometryStagingExpr(ext string, arrowField arrow.Field, sql string) (string, error) {
+	storageType := arrowStorageType(arrowField.Type)
 	switch ext {
 	case "geoarrow.point":
-		return arrowIngestGeoArrowPointGeometryStagingExpr(sql), nil
+		return arrowIngestGeoArrowPointGeometryStagingExpr(storageType, sql)
 	case "geoarrow.linestring":
-		return arrowIngestGeoArrowLineStringGeometryStagingExpr(sql), nil
+		return arrowIngestGeoArrowLineStringGeometryStagingExpr(storageType, sql)
 	case "geoarrow.polygon":
-		return arrowIngestGeoArrowPolygonGeometryStagingExpr(sql), nil
+		return arrowIngestGeoArrowPolygonGeometryStagingExpr(storageType, sql)
 	case "geoarrow.multipoint":
-		return arrowIngestGeoArrowMultiPointGeometryStagingExpr(sql), nil
+		return arrowIngestGeoArrowMultiPointGeometryStagingExpr(storageType, sql)
 	case "geoarrow.multilinestring":
-		return arrowIngestGeoArrowMultiLineStringGeometryStagingExpr(sql), nil
+		return arrowIngestGeoArrowMultiLineStringGeometryStagingExpr(storageType, sql)
 	case "geoarrow.multipolygon":
-		return arrowIngestGeoArrowMultiPolygonGeometryStagingExpr(sql), nil
+		return arrowIngestGeoArrowMultiPolygonGeometryStagingExpr(storageType, sql)
 	case "geoarrow.geometry", "geoarrow.geometrycollection":
 		return "", fmt.Errorf("%s ingest is not supported from native union storage; send geoarrow.wkb, geoarrow.wkt, geoarrow.geojson, or a concrete GeoArrow coordinate layout", ext)
 	default:

@@ -98,6 +98,20 @@ func TestArrowIngestJSONRejectsInvalidGeoJSONStorage(t *testing.T) {
 	}
 }
 
+func TestArrowIngestJSONRejectsInvalidArrowJSONStorage(t *testing.T) {
+	_, err := arrowIngestJSONStagingExpr(arrow.Field{
+		Name:     "payload",
+		Type:     arrow.BinaryTypes.Binary,
+		Metadata: arrow.MetadataFrom(map[string]string{"ARROW:extension:name": "arrow.json"}),
+	}, "payload")
+	if err == nil {
+		t.Fatal("expected invalid arrow.json storage to be rejected")
+	}
+	if !strings.Contains(err.Error(), `cannot use arrow.json storage`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestArrowIngestStagingBuildsNativeGeoArrowSelectExpr(t *testing.T) {
 	field := geometryTestField("")
 	staging := NewArrowIngestStagingBuilder()
@@ -131,6 +145,39 @@ func TestArrowIngestStagingBuildsNativeGeoArrowSelectExpr(t *testing.T) {
 				strings.Contains(got, "ST_GeomFromText(") ||
 				strings.Contains(got, "ST_AsText(") {
 				t.Fatalf("unexpected conversion for %s: %s", tt.ext, got)
+			}
+		})
+	}
+}
+
+func TestArrowIngestStagingBuildsNativeGeoArrowFixedSizeListSelectExpr(t *testing.T) {
+	field := geometryTestField("")
+	staging := NewArrowIngestStagingBuilder()
+
+	tests := []struct {
+		ext  string
+		want string
+	}{
+		{"geoarrow.point", "ST_Point(geom[1], geom[2])"},
+		{"geoarrow.linestring", "ST_MakeLine(list_transform(geom, lambda _p: ST_Point(_p[1], _p[2])))"},
+		{"geoarrow.polygon", "ST_MakePolygon(ST_MakeLine(list_transform(geom[1], lambda _p: ST_Point(_p[1], _p[2])))"},
+		{"geoarrow.multipoint", "ST_Multi(ST_Collect(list_transform(geom, lambda _p: ST_Point(_p[1], _p[2]))))"},
+		{"geoarrow.multilinestring", "ST_Multi(ST_Collect(list_transform(geom, lambda _ls: ST_MakeLine(list_transform(_ls, lambda _p: ST_Point(_p[1], _p[2]))))))"},
+		{"geoarrow.multipolygon", "ST_Multi(ST_Collect(list_transform(geom, lambda _poly: ST_MakePolygon(ST_MakeLine(list_transform(_poly[1], lambda _p: ST_Point(_p[1], _p[2])))"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.ext, func(t *testing.T) {
+			got, err := staging.SelectExpr(field, arrow.Field{
+				Name:     "geom",
+				Type:     geoArrowFixedSizeListTestType(tt.ext),
+				Metadata: arrow.MetadataFrom(map[string]string{"ARROW:extension:name": tt.ext}),
+			}, "geom")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(got, tt.want) {
+				t.Fatalf("expected %q in %s", tt.want, got)
 			}
 		})
 	}
@@ -226,6 +273,23 @@ func TestArrowIngestStagingBuildsDirectGeometrySelectExpr(t *testing.T) {
 				t.Fatalf("expected direct geometry expression without ST_AsText, got %s", got)
 			}
 		})
+	}
+}
+
+func TestArrowIngestRejectsInvalidGeoArrowWKBStorage(t *testing.T) {
+	field := geometryTestField("")
+	staging := NewArrowIngestStagingBuilder()
+
+	_, err := staging.SelectExpr(field, arrow.Field{
+		Name:     "geom",
+		Type:     &arrow.FixedSizeBinaryType{ByteWidth: 16},
+		Metadata: arrow.MetadataFrom(map[string]string{"ARROW:extension:name": "geoarrow.wkb"}),
+	}, "geom")
+	if err == nil {
+		t.Fatal("expected invalid geoarrow.wkb storage to be rejected")
+	}
+	if !strings.Contains(err.Error(), `cannot use geoarrow.wkb storage`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -345,6 +409,22 @@ func geoArrowTestType(ext string) arrow.DataType {
 		arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Float64},
 		arrow.Field{Name: "y", Type: arrow.PrimitiveTypes.Float64},
 	)
+	switch ext {
+	case "geoarrow.point":
+		return point
+	case "geoarrow.linestring", "geoarrow.multipoint":
+		return arrow.ListOf(point)
+	case "geoarrow.polygon", "geoarrow.multilinestring":
+		return arrow.ListOf(arrow.ListOf(point))
+	case "geoarrow.multipolygon":
+		return arrow.ListOf(arrow.ListOf(arrow.ListOf(point)))
+	default:
+		return point
+	}
+}
+
+func geoArrowFixedSizeListTestType(ext string) arrow.DataType {
+	point := arrow.FixedSizeListOf(2, arrow.PrimitiveTypes.Float64)
 	switch ext {
 	case "geoarrow.point":
 		return point
